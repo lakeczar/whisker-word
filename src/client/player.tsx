@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { MIN_PLAYERS, ROLE_NAMES, roleDistribution } from "../shared/rules";
 import type { PlayerRoomView } from "../shared/types";
 import { getPublicRoom, joinRoom, roomAction } from "./api";
-import { HostControls, lobbyPreviewCount } from "./host";
+import { HostControls, lobbyPreviewCount, useHostActions } from "./host";
 import {
   ConnectionBadge,
   InlineError,
@@ -98,6 +98,8 @@ export function PlayerPage({ code }: { code: string }) {
   const room = rawRoom?.viewer === "player" ? rawRoom : null;
   const host = useRoom(code, token ? hostToken : null);
   const hostRoom = host.room?.viewer === "host" ? host.room : null;
+  const hostActions = useHostActions(code, hostToken ?? "", host.setRoom);
+  const removeSeat = hostToken && hostRoom ? hostActions.remove : undefined;
   const [name, setName] = useState("");
   const [joining, setJoining] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -227,7 +229,7 @@ export function PlayerPage({ code }: { code: string }) {
             <section className="stage-section">
               <div className="stage-section__head"><h2>At the table</h2><span className="pill">{room.table.length}/{room.targetPlayers} joined</span></div>
               <RoleTiles counts={roleDistribution(lobbyPreviewCount(room))} caption={`Roles for ${lobbyPreviewCount(room)} players`} />
-              <TableList room={room} meId={room.playerId} />
+              <TableList room={room} meId={room.playerId} onRemove={removeSeat} busy={hostActions.busy !== null} />
             </section>
           </>
         )}
@@ -274,14 +276,14 @@ export function PlayerPage({ code }: { code: string }) {
           <section className="stage-section">
             <div className="stage-section__head"><h2>{room.phase === "revealed" ? "Everyone’s cards" : "Who’s still in"}</h2></div>
             {room.roleCounts && room.phase === "active" && <RoleTiles counts={room.roleCounts} out={room.outCounts} />}
-            <TableList room={room} meId={room.playerId} />
+            <TableList room={room} meId={room.playerId} onRemove={removeSeat} busy={hostActions.busy !== null} />
             {room.phase === "revealed" && <p className="helper">Keep this page open. The next card lands here.</p>}
           </section>
         )}
 
         {room.phase === "active" && hostPanel}
         {room.table.length < MIN_PLAYERS && room.phase === "lobby" && !room.isHost && <p className="helper">The game needs at least {MIN_PLAYERS} players.</p>}
-        <InlineError message={actionError ?? error ?? host.error} />
+        <InlineError message={actionError ?? hostActions.error ?? error ?? host.error} />
       </section>
     </main>
   );

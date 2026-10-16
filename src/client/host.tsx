@@ -60,8 +60,9 @@ export function lobbyPreviewCount(room: Pick<HostRoomView, "table" | "targetPlay
   return room.table.length >= MIN_PLAYERS ? room.table.length : room.targetPlayers;
 }
 
-function SetupEditor({ room, onSave, onCancel, busy }: {
+function SetupEditor({ room, onSave, onCancel, busy, saveError }: {
   room: HostRoomView;
+  saveError: string | null;
   onSave: (draft: SetupDraft, library: ReturnType<typeof usePackChoices>["library"]) => void;
   onCancel: () => void;
   busy: boolean;
@@ -78,7 +79,7 @@ function SetupEditor({ room, onSave, onCancel, busy }: {
       <PlayerCountPicker value={draft.targetPlayers} min={Math.max(MIN_PLAYERS, room.table.length)} onChange={(targetPlayers) => setDraft({ ...draft, targetPlayers })} />
       <div className="field-label field-label--spaced">Word packs</div>
       <PackPicker packs={packs} library={library} draft={draft} onChange={setDraft} />
-      <InlineError message={error} />
+      <InlineError message={saveError ?? error} />
       <div className="setup-editor__actions">
         <button className="button button--secondary" onClick={onCancel} disabled={busy}>Cancel</button>
         <button className="button button--primary" disabled={busy || (!draft.packIds.length && !draft.customIds.length)} onClick={() => onSave(draft, library)}>
@@ -112,6 +113,7 @@ export function HostControls({ code, hostToken, room, onRoom, showOutcome = true
     return (
       <SetupEditor
         room={room}
+        saveError={actions.error}
         busy={actions.busy === "settings"}
         onCancel={() => setEditing(false)}
         onSave={(draft, library) => {

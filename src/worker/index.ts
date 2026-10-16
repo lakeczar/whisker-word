@@ -354,7 +354,6 @@ export class RoomDurableObject extends DurableObject<Env> {
       tokenHash: await sha256(seatToken),
       joinedAt: Date.now(),
       ready: false,
-      out: false,
     };
     data.players.push(player);
     return { player, seatToken };
@@ -454,7 +453,7 @@ export class RoomDurableObject extends DurableObject<Env> {
     if (action === "out") {
       if (data.phase !== "active") throw new HttpError(409, "This round is already over.");
       player.ready = true;
-      player.out = true;
+      if (!data.game.outIds.includes(player.id)) data.game.outIds.push(player.id);
     }
     await this.save(data);
     await this.broadcast(data);
@@ -479,11 +478,9 @@ export class RoomDurableObject extends DurableObject<Env> {
       number: (data.game?.number ?? 0) + 1,
       pair: selection.pair,
       assignments: buildAssignments(data.players.map((player) => player.id), secureRandom),
+      outIds: [],
     };
-    for (const player of data.players) {
-      player.ready = false;
-      player.out = false;
-    }
+    for (const player of data.players) player.ready = false;
     await this.save(data);
     await this.broadcast(data);
     return apiJson(this.hostView(data));

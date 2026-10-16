@@ -17,7 +17,6 @@ export interface PlayerRecord {
   tokenHash: string;
   joinedAt: number;
   ready: boolean;
-  out: boolean;
 }
 
 export interface GameRecord {
@@ -25,6 +24,8 @@ export interface GameRecord {
   number: number;
   pair: WordPair;
   assignments: Record<string, Role>;
+  /** Players voted out this round. Kept on the round so removing a seat later does not change its result. */
+  outIds: string[];
 }
 
 export interface SocketTicket {
@@ -48,21 +49,25 @@ export interface RoomData extends RoomSettings {
 
 /** Brings a room saved by an earlier version of the game up to the current shape. */
 export function normalizeRoom(raw: RoomData): RoomData {
-  const legacy = raw as RoomData & {
-    mode?: string;
-    players: (PlayerRecord & { revealed?: boolean })[];
-    game?: GameRecord & { firstPlayerId?: string };
-  };
+  const legacy = raw as RoomData & { mode?: string; game?: GameRecord & { firstPlayerId?: string } };
+  const players = legacy.players as (PlayerRecord & { revealed?: boolean; out?: boolean })[];
   legacy.targetPlayers ??= legacy.mode === "experimental" ? 12 : 8;
   legacy.packIds ??= BUILT_IN_PACKS.map((pack) => pack.id);
   legacy.customPacks ??= [];
-  for (const player of legacy.players) {
-    player.out ??= player.revealed ?? false;
+  if (legacy.game) {
+    legacy.game.outIds ??= players.filter((player) => player.revealed).map((player) => player.id);
+    delete legacy.game.firstPlayerId;
+  }
+  for (const player of players) {
     delete player.revealed;
+    delete player.out;
   }
   delete legacy.mode;
-  if (legacy.game) delete legacy.game.firstPlayerId;
   return legacy;
+}
+
+export function isOut(data: RoomData, playerId: string): boolean {
+  return !!data.game?.outIds.includes(playerId);
 }
 
 function dealtAndOut(data: RoomData): { dealt: RoleCounts; out: RoleCounts } | undefined {
@@ -70,7 +75,7 @@ function dealtAndOut(data: RoomData): { dealt: RoleCounts; out: RoleCounts } | u
   const assignments = data.game.assignments;
   return {
     dealt: countRoles(Object.values(assignments)),
-    out: countRoles(data.players.filter((player) => player.out && assignments[player.id]).map((player) => assignments[player.id])),
+    out: countRoles(data.game.outIds.filter((id) => assignments[id]).map((id) => assignments[id])),
   };
 }
 
@@ -78,16 +83,17 @@ function table(data: RoomData, connectedIds: ReadonlySet<string>): TableSeat[] {
   const roundOver = data.phase === "revealed";
   return data.players.map((player) => {
     const role = data.game?.assignments[player.id];
+    const out = isOut(data, player.id);
     const seat: TableSeat = {
       id: player.id,
       name: player.name,
       connected: connectedIds.has(player.id),
       ready: player.ready,
-      out: player.out,
+      out,
       isHost: player.id === data.hostPlayerId,
       inGame: !!role,
     };
-    if (role && (roundOver || player.out)) seat.role = role;
+    if (role && (roundOver || out)) seat.role = role;
     return seat;
   });
 }
@@ -139,14 +145,14 @@ export function buildPlayerView(data: RoomData, playerId: string, connectedIds: 
     playerName: player.name,
     isHost: player.id === data.hostPlayerId,
     ready: player.ready,
-    out: player.out,
+    out: isOut(data, playerId),
   };
   const role = data.game?.assignments[playerId];
   if (!data.game || !role) return view;
   view.visibleRole = role === "spy" ? "spy-pup" : "kitten";
   if (role === "good") view.word = data.game.pair.goodWord;
   if (role === "confused") view.word = data.game.pair.confusedWord;
-  if (data.phase === "revealed" || player.out) view.exactRole = role;
-  if (role === "spy" && player.out) view.spyAnswer = data.game.pair.goodWord;
+  if (data.phase === "revealed" || view.out) view.exactRole = role;
+  if (role === "spy" && view.out) view.spyAnswer = data.game.pair.goodWord;
   return view;
 }

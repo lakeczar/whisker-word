@@ -17,8 +17,8 @@ function room(overrides: Partial<RoomData> = {}): RoomData {
     targetPlayers: 6,
     packIds: ["food-drink"],
     customPacks: [],
-    players: names.map((name, index) => ({ id: `p${index}`, name, tokenHash: `t${index}`, joinedAt: index, ready: true, out: false })),
-    game: { id: "g", number: 1, pair, assignments: Object.fromEntries(roles.map((role, index) => [`p${index}`, role])) },
+    players: names.map((name, index) => ({ id: `p${index}`, name, tokenHash: `t${index}`, joinedAt: index, ready: true })),
+    game: { id: "g", number: 1, pair, assignments: Object.fromEntries(roles.map((role, index) => [`p${index}`, role])), outIds: [] },
     usedPairKeys: [],
     tickets: {},
     ...overrides,
@@ -37,7 +37,7 @@ describe("host view during a live round", () => {
 
   it("shows the role of a player only after they are out", () => {
     const data = room();
-    data.players[2].out = true;
+    data.game!.outIds.push("p2");
     const view = buildHostView(data, connected);
     expect(view.table.map((seat) => seat.role)).toEqual([undefined, undefined, "confused", undefined, undefined, undefined]);
     expect(view.outCounts).toEqual({ good: 0, confused: 1, spy: 0 });
@@ -59,7 +59,7 @@ describe("player view", () => {
     const data = room();
     expect(buildPlayerView(data, "p3", connected)!.word).toBeUndefined();
     expect(JSON.stringify(buildPlayerView(data, "p3", connected))).not.toContain("Coffee");
-    data.players[3].out = true;
+    data.game!.outIds.push("p3");
     const out = buildPlayerView(data, "p3", connected)!;
     expect(out.exactRole).toBe("spy");
     expect(out.spyAnswer).toBe("Coffee");
@@ -68,9 +68,17 @@ describe("player view", () => {
 
   it("calls the round once every impostor is out", () => {
     const data = room();
-    data.players[2].out = true;
-    data.players[3].out = true;
+    data.game!.outIds.push("p2", "p3");
     expect(buildPlayerView(data, "p1", connected)!.outcome).toBe("kittens");
+  });
+
+  it("keeps a finished round's result after an out player's seat is removed", () => {
+    const data = room({ phase: "revealed" });
+    data.game!.outIds.push("p2", "p3");
+    data.players = data.players.filter((player) => player.id !== "p3");
+    const view = buildPlayerView(data, "p1", connected)!;
+    expect(view.outcome).toBe("kittens");
+    expect(view.outCounts).toEqual({ good: 0, confused: 1, spy: 1 });
   });
 
   it("shows every role and both words once the round is over", () => {
@@ -81,7 +89,7 @@ describe("player view", () => {
 
   it("marks a late joiner as not in this round", () => {
     const data = room();
-    data.players.push({ id: "late", name: "Late", tokenHash: "x", joinedAt: 9, ready: false, out: false });
+    data.players.push({ id: "late", name: "Late", tokenHash: "x", joinedAt: 9, ready: false });
     const view = buildPlayerView(data, "late", connected)!;
     expect(view.visibleRole).toBeUndefined();
     expect(view.table.find((seat) => seat.id === "late")!.inGame).toBe(false);
@@ -103,7 +111,8 @@ describe("normalizeRoom", () => {
     expect(data.targetPlayers).toBe(12);
     expect(data.packIds.length).toBeGreaterThan(0);
     expect(data.customPacks).toEqual([]);
-    expect(data.players[0].out).toBe(true);
+    expect(data.game!.outIds).toEqual(["p0"]);
+    expect("revealed" in data.players[0]).toBe(false);
     expect("firstPlayerId" in data.game!).toBe(false);
   });
 });
