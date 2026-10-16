@@ -34,6 +34,11 @@ export interface RoomSettings {
   customPacks: WordPack[];
 }
 
+/** A setup change. `keepCustomPackIds` keeps custom packs the room already holds but this browser's library no longer has. */
+export interface RoomSettingsUpdate extends RoomSettings {
+  keepCustomPackIds?: string[];
+}
+
 /** Public information about one seat. `role` is only present once that player is out or the round is over. */
 export interface TableSeat {
   id: string;

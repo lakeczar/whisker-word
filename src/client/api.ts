@@ -1,4 +1,4 @@
-import type { CustomLibrary, HostRoomView, PackSummary, RoomSettings, RoomView, WordPack } from "../shared/types";
+import type { CustomLibrary, HostRoomView, PackSummary, RoomSettings, RoomSettingsUpdate, RoomView, WordPack } from "../shared/types";
 
 export class ApiRequestError extends Error {
   constructor(message: string, public status: number) {
@@ -66,12 +66,7 @@ export async function startGame(code: string, token: string): Promise<HostRoomVi
   return roomAction(code, token, "host/start");
 }
 
-/** Leave out `customPacks` to keep the room's current custom packs. */
-export async function updateSettings(
-  code: string,
-  token: string,
-  settings: Omit<RoomSettings, "customPacks"> & { customPacks?: RoomSettings["customPacks"] },
-): Promise<HostRoomView> {
+export async function updateSettings(code: string, token: string, settings: RoomSettingsUpdate): Promise<HostRoomView> {
   return roomAction(code, token, "host/settings", settings);
 }
 

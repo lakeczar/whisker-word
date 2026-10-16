@@ -68,6 +68,7 @@ function SetupEditor({ room, onSave, onCancel, busy, saveError }: {
   busy: boolean;
 }) {
   const { packs, library, error } = usePackChoices();
+  const roomOnly = room.customPacks.filter((pack) => !library.some((candidate) => candidate.id === pack.id));
   const [draft, setDraft] = useState<SetupDraft>({
     targetPlayers: room.targetPlayers,
     packIds: room.packIds,
@@ -78,7 +79,7 @@ function SetupEditor({ room, onSave, onCancel, busy, saveError }: {
       <div className="field-label">Players</div>
       <PlayerCountPicker value={draft.targetPlayers} min={Math.max(MIN_PLAYERS, room.table.length)} onChange={(targetPlayers) => setDraft({ ...draft, targetPlayers })} />
       <div className="field-label field-label--spaced">Word packs</div>
-      <PackPicker packs={packs} library={library} draft={draft} onChange={setDraft} />
+      <PackPicker packs={packs} library={library} roomOnly={roomOnly} draft={draft} onChange={setDraft} />
       <InlineError message={saveError ?? error} />
       <div className="setup-editor__actions">
         <button className="button button--secondary" onClick={onCancel} disabled={busy}>Cancel</button>
@@ -117,12 +118,10 @@ export function HostControls({ code, hostToken, room, onRoom, showOutcome = true
         busy={actions.busy === "settings"}
         onCancel={() => setEditing(false)}
         onSave={(draft, library) => {
-          // Custom packs saved from another browser cannot be re-sent from here, so keep them unless the host changed that choice.
-          const missingCustom = room.customPacks.some((pack) => !library.some((candidate) => candidate.id === pack.id));
-          const customUnchanged = draft.customIds.length === room.customPacks.length && room.customPacks.every((pack) => draft.customIds.includes(pack.id));
-          const settings = settingsFrom(draft, library);
+          // Packs this browser's library lacks cannot be re-sent, so the room keeps the ones still ticked by id.
+          const keepCustomPackIds = draft.customIds.filter((id) => !library.some((pack) => pack.id === id));
           void actions.run("settings", async () => {
-            const next = await updateSettings(code, hostToken, missingCustom && customUnchanged ? { ...settings, customPacks: undefined } : settings);
+            const next = await updateSettings(code, hostToken, { ...settingsFrom(draft, library), keepCustomPackIds });
             setEditing(false);
             return next;
           });

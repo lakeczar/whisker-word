@@ -6,6 +6,7 @@ import type {
   PackSummary,
   PlayerRoomView,
   RoomSettings,
+  RoomSettingsUpdate,
   WordPack,
   WordPair,
 } from "../shared/types";
@@ -143,8 +144,7 @@ function validateLibraryPacks(input: unknown): WordPack[] {
   return packs;
 }
 
-/** `customPacks` left out of the input keeps `currentCustomPacks`, so a host on a browser without the library can still change other settings. */
-function validateSettings(input: Partial<RoomSettings> | undefined, joinedPlayers: number, currentCustomPacks: WordPack[] = []): RoomSettings {
+function validateSettings(input: Partial<RoomSettingsUpdate> | undefined, joinedPlayers: number, currentCustomPacks: WordPack[] = []): RoomSettings {
   const targetPlayers = Number(input?.targetPlayers);
   if (!Number.isInteger(targetPlayers) || targetPlayers < MIN_PLAYERS || targetPlayers > MAX_PLAYERS) {
     throw new HttpError(400, `Choose ${MIN_PLAYERS} to ${MAX_PLAYERS} players.`);
@@ -154,7 +154,10 @@ function validateSettings(input: Partial<RoomSettings> | undefined, joinedPlayer
   }
   const requested = new Set(Array.isArray(input?.packIds) ? input.packIds : []);
   const packIds = BUILT_IN_PACKS.filter((pack) => requested.has(pack.id)).map((pack) => pack.id);
-  const customPacks = input?.customPacks === undefined ? currentCustomPacks : validateLibraryPacks(input.customPacks);
+  const provided = input?.customPacks === undefined ? [] : validateLibraryPacks(input.customPacks);
+  const keep = new Set(Array.isArray(input?.keepCustomPackIds) ? input.keepCustomPackIds : []);
+  const kept = currentCustomPacks.filter((pack) => keep.has(pack.id) && !provided.some((candidate) => candidate.id === pack.id));
+  const customPacks = kept.length ? validateLibraryPacks([...kept, ...provided]) : provided;
   if (!packIds.length && !customPacks.some((pack) => pack.pairs.length)) {
     throw new HttpError(400, "Choose at least one word pack.");
   }
@@ -490,7 +493,7 @@ export class RoomDurableObject extends DurableObject<Env> {
     const data = await this.requireRoom();
     await this.requireHost(request, data);
     if (data.phase === "active") throw new HttpError(409, "End the current round before changing the setup.");
-    const settings = validateSettings(await readJson<Partial<RoomSettings>>(request), data.players.length, data.customPacks);
+    const settings = validateSettings(await readJson<Partial<RoomSettingsUpdate>>(request), data.players.length, data.customPacks);
     Object.assign(data, settings);
     await this.save(data);
     await this.broadcast(data);

@@ -79,11 +79,14 @@ export function PlayerCountPicker({ value, min = MIN_PLAYERS, onChange }: { valu
 export function PackPicker({
   packs,
   library,
+  roomOnly = [],
   draft,
   onChange,
 }: {
   packs: PackSummary[] | null;
   library: WordPack[];
+  /** Custom packs the room holds that this browser's library does not. */
+  roomOnly?: { id: string; name: string; pairCount: number }[];
   draft: SetupDraft;
   onChange: (draft: SetupDraft) => void;
 }) {
@@ -91,7 +94,12 @@ export function PackPicker({
   const toggle = (list: string[], id: string) => list.includes(id) ? list.filter((value) => value !== id) : [...list, id];
   const allSelected = draft.packIds.length === packs.length;
   const pairCount = packs.filter((pack) => draft.packIds.includes(pack.id)).reduce((sum, pack) => sum + pack.pairCount, 0)
-    + library.filter((pack) => draft.customIds.includes(pack.id)).reduce((sum, pack) => sum + pack.pairs.length, 0);
+    + library.filter((pack) => draft.customIds.includes(pack.id)).reduce((sum, pack) => sum + pack.pairs.length, 0)
+    + roomOnly.filter((pack) => draft.customIds.includes(pack.id)).reduce((sum, pack) => sum + pack.pairCount, 0);
+  const customChoices = [
+    ...library.map((pack) => ({ id: pack.id, name: pack.name, detail: `${pack.pairs.length} pairs you wrote` })),
+    ...roomOnly.map((pack) => ({ id: pack.id, name: pack.name, detail: `${pack.pairCount} pairs saved in this room` })),
+  ];
   return (
     <div className="pack-picker">
       <div className="pack-picker__head">
@@ -108,14 +116,14 @@ export function PackPicker({
           </label>
         ))}
       </div>
-      {library.length > 0 && (
+      {customChoices.length > 0 && (
         <>
           <div className="field-label field-label--spaced">My custom packs</div>
           <div className="chip-grid">
-            {library.map((pack) => (
+            {customChoices.map((pack) => (
               <label key={pack.id} className={draft.customIds.includes(pack.id) ? "chip chip--selected chip--custom" : "chip chip--custom"}>
                 <input type="checkbox" checked={draft.customIds.includes(pack.id)} onChange={() => onChange({ ...draft, customIds: toggle(draft.customIds, pack.id) })} />
-                <span><b>{pack.name}</b><small>{pack.pairs.length} pairs you wrote</small></span>
+                <span><b>{pack.name}</b><small>{pack.detail}</small></span>
               </label>
             ))}
           </div>
