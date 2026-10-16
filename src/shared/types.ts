@@ -1,6 +1,14 @@
-export type RoomMode = "official" | "experimental";
 export type RoomPhase = "lobby" | "active" | "revealed" | "ended";
 export type Role = "good" | "confused" | "spy";
+
+export interface RoleCounts {
+  good: number;
+  confused: number;
+  spy: number;
+}
+
+/** "kittens" when every Confused Kitten and Spy Pup is out; "impostors" when one Good Kitten or fewer is left. */
+export type RoundOutcome = "kittens" | "impostors";
 
 export interface WordPair {
   goodWord: string;
@@ -16,46 +24,64 @@ export interface WordPack {
 export interface PackSummary {
   id: string;
   name: string;
+  description: string;
   pairCount: number;
 }
 
-export interface PlayerSummary {
+export interface RoomSettings {
+  targetPlayers: number;
+  packIds: string[];
+  customPacks: WordPack[];
+}
+
+/** Public information about one seat. `role` is only present once that player is out or the round is over. */
+export interface TableSeat {
   id: string;
   name: string;
   connected: boolean;
   ready: boolean;
-  joinedAt: number;
+  out: boolean;
+  isHost: boolean;
+  role?: Role;
+  inGame: boolean;
 }
 
-export interface HostRoomView {
-  viewer: "host";
+interface RoomViewBase {
   code: string;
   phase: RoomPhase;
-  mode: RoomMode;
   gameNumber: number;
-  players: PlayerSummary[];
-  firstPlayerName?: string;
-  readyCount: number;
-  minimumPlayers: number;
-  maximumPlayers: number;
-}
-
-export interface PlayerRoomView {
-  viewer: "player";
-  code: string;
-  phase: RoomPhase;
-  mode: RoomMode;
-  gameNumber: number;
-  playerId: string;
-  playerName: string;
-  playerCount: number;
-  firstPlayerName?: string;
-  ready: boolean;
-  visibleRole?: "kitten" | "spy-pup";
-  word?: string;
-  exactRole?: Role;
+  targetPlayers: number;
+  table: TableSeat[];
+  /** Roles dealt in the current round. */
+  roleCounts?: RoleCounts;
+  /** How many of each role have been voted out and revealed this round. */
+  outCounts?: RoleCounts;
+  outcome?: RoundOutcome;
+  /** Both words, sent only once the round is over. */
   goodWord?: string;
   confusedWord?: string;
+}
+
+export interface HostRoomView extends RoomViewBase {
+  viewer: "host";
+  packIds: string[];
+  customPacks: { id: string; name: string; pairCount: number }[];
+  hostPlayerId?: string;
+}
+
+export interface PlayerRoomView extends RoomViewBase {
+  viewer: "player";
+  playerId: string;
+  playerName: string;
+  isHost: boolean;
+  ready: boolean;
+  out: boolean;
+  visibleRole?: "kitten" | "spy-pup";
+  word?: string;
+  /** This player's exact role, sent once they are out or the round is over. */
+  exactRole?: Role;
+  /** The Good word for a Spy Pup who is out and has made their final guess. */
+  spyAnswer?: string;
 }
 
 export type RoomView = HostRoomView | PlayerRoomView;

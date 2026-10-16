@@ -5,55 +5,19 @@ import type {
   HostRoomView,
   PackSummary,
   PlayerRoomView,
-  Role,
-  RoomMode,
-  RoomPhase,
+  RoomSettings,
   WordPack,
   WordPair,
 } from "../shared/types";
-import { buildAssignments, choosePair } from "./game";
+import { MAX_PLAYERS, MIN_PLAYERS } from "../shared/rules";
+import { buildAssignments, choosePair, pairKey } from "./game";
+import { buildHostView, buildPlayerView, normalizeRoom } from "./room";
+import type { PlayerRecord, RoomData } from "./room";
 import { BUILT_IN_PACKS } from "./wordPacks";
 
 interface Env {
   ROOMS: DurableObjectNamespace<RoomDurableObject>;
   LIBRARIES: DurableObjectNamespace<LibraryDurableObject>;
-}
-
-interface PlayerRecord {
-  id: string;
-  name: string;
-  tokenHash: string;
-  joinedAt: number;
-  ready: boolean;
-  revealed: boolean;
-  correctWordShown: boolean;
-}
-
-interface GameRecord {
-  id: string;
-  number: number;
-  pair: WordPair;
-  assignments: Record<string, Role>;
-  firstPlayerId: string;
-}
-
-interface SocketTicket {
-  subject: "host" | "player";
-  playerId?: string;
-  expiresAt: number;
-}
-
-interface RoomData {
-  code: string;
-  hostTokenHash: string;
-  createdAt: number;
-  updatedAt: number;
-  phase: RoomPhase;
-  mode: RoomMode;
-  players: PlayerRecord[];
-  game?: GameRecord;
-  usedPairKeys: string[];
-  tickets: Record<string, SocketTicket>;
 }
 
 interface SocketAttachment {
@@ -179,6 +143,24 @@ function validateLibraryPacks(input: unknown): WordPack[] {
   return packs;
 }
 
+/** `customPacks` left out of the input keeps `currentCustomPacks`, so a host on a browser without the library can still change other settings. */
+function validateSettings(input: Partial<RoomSettings> | undefined, joinedPlayers: number, currentCustomPacks: WordPack[] = []): RoomSettings {
+  const targetPlayers = Number(input?.targetPlayers);
+  if (!Number.isInteger(targetPlayers) || targetPlayers < MIN_PLAYERS || targetPlayers > MAX_PLAYERS) {
+    throw new HttpError(400, `Choose ${MIN_PLAYERS} to ${MAX_PLAYERS} players.`);
+  }
+  if (targetPlayers < joinedPlayers) {
+    throw new HttpError(409, `${joinedPlayers} players have already joined. Remove someone or choose at least ${joinedPlayers}.`);
+  }
+  const requested = new Set(Array.isArray(input?.packIds) ? input.packIds : []);
+  const packIds = BUILT_IN_PACKS.filter((pack) => requested.has(pack.id)).map((pack) => pack.id);
+  const customPacks = input?.customPacks === undefined ? currentCustomPacks : validateLibraryPacks(input.customPacks);
+  if (!packIds.length && !customPacks.some((pack) => pack.pairs.length)) {
+    throw new HttpError(400, "Choose at least one word pack.");
+  }
+  return { targetPlayers, packIds, customPacks };
+}
+
 async function roomStub(env: Env, rawCode: string): Promise<DurableObjectStub<RoomDurableObject>> {
   const code = normalizedRoomCode(rawCode);
   return env.ROOMS.getByName(code);
@@ -202,7 +184,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   const segments = url.pathname.split("/").filter(Boolean);
 
   if (request.method === "GET" && url.pathname === "/api/packs") {
-    const packs: PackSummary[] = BUILT_IN_PACKS.map(({ id, name, pairs }) => ({ id, name, pairCount: pairs.length }));
+    const packs: PackSummary[] = BUILT_IN_PACKS.map(({ id, name, description, pairs }) => ({ id, name, description, pairCount: pairs.length }));
     return apiJson({ packs });
   }
 
@@ -229,13 +211,14 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   }
 
   if (request.method === "POST" && url.pathname === "/api/rooms") {
+    const setup = await readJson<Record<string, unknown>>(request);
     for (let attempt = 0; attempt < 8; attempt += 1) {
       const code = randomRoomCode();
       const stub = env.ROOMS.getByName(code);
       const response = await stub.fetch(new Request("https://room.internal/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code }),
+        body: JSON.stringify({ ...setup, code }),
       }));
       if (response.status === 409) continue;
       return response;
@@ -253,8 +236,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       ticket: "ticket",
       socket: "socket",
       "player/ready": "player/ready",
-      "player/reveal": "player/reveal",
-      "player/spy-answer": "player/spy-answer",
+      "player/out": "player/out",
       "host/start": "host/start",
       "host/settings": "host/settings",
       "host/reveal": "host/reveal",
@@ -287,7 +269,10 @@ export class RoomDurableObject extends DurableObject<Env> {
   private data?: RoomData;
 
   private async load(): Promise<RoomData | undefined> {
-    if (!this.data) this.data = await this.ctx.storage.get<RoomData>("room");
+    if (!this.data) {
+      const stored = await this.ctx.storage.get<RoomData>("room");
+      this.data = stored ? normalizeRoom(stored) : undefined;
+    }
     return this.data;
   }
 
@@ -314,124 +299,54 @@ export class RoomDurableObject extends DurableObject<Env> {
     return { subject: "player", playerId: player.id };
   }
 
-  private playerConnected(playerId: string): boolean {
-    return this.ctx.getWebSockets().some((socket) => {
+  private async requireHost(request: Request, data: RoomData): Promise<void> {
+    const attachment = await this.authenticate(request, data);
+    if (attachment.subject !== "host") throw new HttpError(403, "Host controls are required.");
+  }
+
+  private connectedPlayerIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const socket of this.ctx.getWebSockets()) {
       const attachment = socket.deserializeAttachment() as SocketAttachment | null;
-      return attachment?.subject === "player" && attachment.playerId === playerId;
-    });
-  }
-
-  private hostView(data: RoomData): HostRoomView {
-    const firstPlayer = data.players.find((player) => player.id === data.game?.firstPlayerId);
-    return {
-      viewer: "host",
-      code: data.code,
-      phase: data.phase,
-      mode: data.mode,
-      gameNumber: data.game?.number ?? 0,
-      players: data.players.map((player) => ({
-        id: player.id,
-        name: player.name,
-        connected: this.playerConnected(player.id),
-        ready: player.ready,
-        joinedAt: player.joinedAt,
-      })),
-      firstPlayerName: firstPlayer?.name,
-      readyCount: data.players.filter((player) => player.ready).length,
-      minimumPlayers: 4,
-      maximumPlayers: data.mode === "official" ? 8 : 12,
-    };
-  }
-
-  private playerView(data: RoomData, playerId: string): PlayerRoomView {
-    const player = data.players.find((candidate) => candidate.id === playerId);
-    if (!player) throw new HttpError(401, "This seat is no longer in the room.");
-    const role = data.game?.assignments[playerId];
-    const firstPlayer = data.players.find((candidate) => candidate.id === data.game?.firstPlayerId);
-    const view: PlayerRoomView = {
-      viewer: "player",
-      code: data.code,
-      phase: data.phase,
-      mode: data.mode,
-      gameNumber: data.game?.number ?? 0,
-      playerId,
-      playerName: player.name,
-      playerCount: data.players.length,
-      firstPlayerName: firstPlayer?.name,
-      ready: player.ready,
-    };
-    if (!data.game || !role) return view;
-    view.visibleRole = role === "spy" ? "spy-pup" : "kitten";
-    if (role === "good") view.word = data.game.pair.goodWord;
-    if (role === "confused") view.word = data.game.pair.confusedWord;
-    if (data.phase === "revealed" || player.revealed) view.exactRole = role;
-    if (data.phase === "revealed") {
-      view.goodWord = data.game.pair.goodWord;
-      view.confusedWord = data.game.pair.confusedWord;
-    } else if (role === "spy" && player.correctWordShown) {
-      view.goodWord = data.game.pair.goodWord;
+      if (attachment?.subject === "player" && attachment.playerId) ids.add(attachment.playerId);
     }
+    return ids;
+  }
+
+  private hostView(data: RoomData, connected = this.connectedPlayerIds()): HostRoomView {
+    return buildHostView(data, connected);
+  }
+
+  private playerView(data: RoomData, playerId: string, connected = this.connectedPlayerIds()): PlayerRoomView {
+    const view = buildPlayerView(data, playerId, connected);
+    if (!view) throw new HttpError(401, "This seat is no longer in the room.");
     return view;
   }
 
-  private viewFor(data: RoomData, attachment: SocketAttachment): HostRoomView | PlayerRoomView {
+  private viewFor(data: RoomData, attachment: SocketAttachment, connected = this.connectedPlayerIds()): HostRoomView | PlayerRoomView {
     return attachment.subject === "host"
-      ? this.hostView(data)
-      : this.playerView(data, attachment.playerId ?? "");
+      ? this.hostView(data, connected)
+      : this.playerView(data, attachment.playerId ?? "", connected);
   }
 
   private async broadcast(data: RoomData): Promise<void> {
+    const connected = this.connectedPlayerIds();
     for (const socket of this.ctx.getWebSockets()) {
       try {
         const attachment = socket.deserializeAttachment() as SocketAttachment | null;
-        if (attachment) socket.send(JSON.stringify({ type: "room", room: this.viewFor(data, attachment) }));
+        if (attachment) socket.send(JSON.stringify({ type: "room", room: this.viewFor(data, attachment, connected) }));
       } catch {
         socket.close(1011, "Room update failed");
       }
     }
   }
 
-  private async create(request: Request): Promise<Response> {
-    if (await this.load()) return apiError("Room code is already in use.", 409);
-    const { code } = await readJson<{ code: string }>(request);
-    const hostToken = randomToken();
-    const now = Date.now();
-    const data: RoomData = {
-      code,
-      hostTokenHash: await sha256(hostToken),
-      createdAt: now,
-      updatedAt: now,
-      phase: "lobby",
-      mode: "official",
-      players: [],
-      usedPairKeys: [],
-      tickets: {},
-    };
-    await this.save(data);
-    return apiJson({ code, hostToken }, 201);
-  }
-
-  private async publicState(): Promise<Response> {
-    const data = await this.requireRoom();
-    return apiJson({
-      code: data.code,
-      phase: data.phase,
-      mode: data.mode,
-      players: data.players.map(({ name }) => ({ name })),
-      playerCount: data.players.length,
-      maximumPlayers: data.mode === "official" ? 8 : 12,
-    });
-  }
-
-  private async join(request: Request): Promise<Response> {
-    const data = await this.requireRoom();
-    const { name: rawName } = await readJson<{ name: string }>(request);
+  private async newSeat(data: RoomData, rawName: unknown): Promise<{ player: PlayerRecord; seatToken: string }> {
     const name = cleanName(rawName);
     if (data.players.some((player) => player.name.localeCompare(name, undefined, { sensitivity: "accent" }) === 0)) {
       throw new HttpError(409, "That name is already in this room.");
     }
-    const maximum = data.mode === "official" ? 8 : 12;
-    if (data.players.length >= maximum) throw new HttpError(409, "This room is full.");
+    if (data.players.length >= data.targetPlayers) throw new HttpError(409, "This room is full.");
     const seatToken = randomToken();
     const player: PlayerRecord = {
       id: randomToken(9),
@@ -439,10 +354,53 @@ export class RoomDurableObject extends DurableObject<Env> {
       tokenHash: await sha256(seatToken),
       joinedAt: Date.now(),
       ready: false,
-      revealed: false,
-      correctWordShown: false,
+      out: false,
     };
     data.players.push(player);
+    return { player, seatToken };
+  }
+
+  private async create(request: Request): Promise<Response> {
+    if (await this.load()) return apiError("Room code is already in use.", 409);
+    const body = await readJson<Partial<RoomSettings> & { code: string; hostName?: string }>(request);
+    const settings = validateSettings(body, 0);
+    const hostToken = randomToken();
+    const now = Date.now();
+    const data: RoomData = {
+      ...settings,
+      code: body.code,
+      hostTokenHash: await sha256(hostToken),
+      createdAt: now,
+      updatedAt: now,
+      phase: "lobby",
+      players: [],
+      usedPairKeys: [],
+      tickets: {},
+    };
+    let seatToken: string | undefined;
+    if (body.hostName !== undefined) {
+      const seat = await this.newSeat(data, body.hostName);
+      data.hostPlayerId = seat.player.id;
+      seatToken = seat.seatToken;
+    }
+    await this.save(data);
+    return apiJson({ code: data.code, hostToken, seatToken }, 201);
+  }
+
+  private async publicState(): Promise<Response> {
+    const data = await this.requireRoom();
+    return apiJson({
+      code: data.code,
+      phase: data.phase,
+      playerCount: data.players.length,
+      targetPlayers: data.targetPlayers,
+    });
+  }
+
+  private async join(request: Request): Promise<Response> {
+    const data = await this.requireRoom();
+    const { name } = await readJson<{ name: string }>(request);
+    const { player, seatToken } = await this.newSeat(data, name);
     await this.save(data);
     await this.broadcast(data);
     return apiJson({ seatToken, playerId: player.id }, 201);
@@ -485,20 +443,18 @@ export class RoomDurableObject extends DurableObject<Env> {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  private async playerAction(request: Request, action: "ready" | "reveal" | "spy-answer"): Promise<Response> {
+  private async playerAction(request: Request, action: "ready" | "out"): Promise<Response> {
     const data = await this.requireRoom();
     const attachment = await this.authenticate(request, data);
     if (attachment.subject !== "player") throw new HttpError(403, "A player seat is required.");
     const player = data.players.find((candidate) => candidate.id === attachment.playerId);
     if (!player) throw new HttpError(401, "This seat is no longer active.");
-    const role = data.game?.assignments[player.id];
-    if (!role) throw new HttpError(409, "Wait for the next game to receive a card.");
+    if (!data.game?.assignments[player.id]) throw new HttpError(409, "Wait for the next round to receive a card.");
     if (action === "ready") player.ready = true;
-    if (action === "reveal") player.revealed = true;
-    if (action === "spy-answer") {
-      if (role !== "spy") throw new HttpError(409, "Only the Spy Pup checks the final guess this way.");
-      player.revealed = true;
-      player.correctWordShown = true;
+    if (action === "out") {
+      if (data.phase !== "active") throw new HttpError(409, "This round is already over.");
+      player.ready = true;
+      player.out = true;
     }
     await this.save(data);
     await this.broadcast(data);
@@ -507,43 +463,26 @@ export class RoomDurableObject extends DurableObject<Env> {
 
   private async startGame(request: Request): Promise<Response> {
     const data = await this.requireRoom();
-    const attachment = await this.authenticate(request, data);
-    if (attachment.subject !== "host") throw new HttpError(403, "Host controls are required.");
-    if (data.phase === "active") throw new HttpError(409, "Reveal the current game before starting another.");
-    const body = await readJson<{ mode: RoomMode; packIds: string[]; customPairs?: WordPair[] }>(request);
-    const mode: RoomMode = body.mode === "experimental" ? "experimental" : "official";
-    const maximum = mode === "official" ? 8 : 12;
-    if (data.players.length < 4 || data.players.length > maximum) {
-      throw new HttpError(409, `${mode === "official" ? "Official" : "Experimental"} mode needs 4 to ${maximum} players.`);
+    await this.requireHost(request, data);
+    if (data.phase === "active") throw new HttpError(409, "End the current round before dealing another.");
+    if (data.players.length < MIN_PLAYERS || data.players.length > MAX_PLAYERS) {
+      throw new HttpError(409, `You need ${MIN_PLAYERS} to ${MAX_PLAYERS} players to deal.`);
     }
-    const selectedIds = new Set(Array.isArray(body.packIds) ? body.packIds : []);
-    const builtInPairs = BUILT_IN_PACKS.filter((pack) => selectedIds.has(pack.id)).flatMap((pack) => pack.pairs);
-    const customPairs = Array.isArray(body.customPairs) ? body.customPairs.map(validatePair) : [];
-    if (customPairs.length > 500) throw new HttpError(400, "Select no more than 500 custom pairs.");
-    const uniquePairs = Array.from(
-      new Map([...builtInPairs, ...customPairs].map((pair) => [
-        `${pair.goodWord.toLocaleLowerCase()}::${pair.confusedWord.toLocaleLowerCase()}`,
-        pair,
-      ])).values(),
-    );
+    const builtInPairs = BUILT_IN_PACKS.filter((pack) => data.packIds.includes(pack.id)).flatMap((pack) => pack.pairs);
+    const customPairs = data.customPacks.flatMap((pack) => pack.pairs);
+    const uniquePairs = Array.from(new Map([...builtInPairs, ...customPairs].map((pair) => [pairKey(pair), pair])).values());
     const selection = choosePair(uniquePairs, data.usedPairKeys, secureRandom);
     data.usedPairKeys = selection.resetUsed ? [selection.key] : [...data.usedPairKeys, selection.key];
-    const playerIds = data.players.map((player) => player.id);
-    const assignments = buildAssignments(playerIds, mode, secureRandom);
-    const firstPlayerId = playerIds[Math.floor(secureRandom() * playerIds.length)];
-    data.mode = mode;
     data.phase = "active";
     data.game = {
       id: randomToken(12),
       number: (data.game?.number ?? 0) + 1,
       pair: selection.pair,
-      assignments,
-      firstPlayerId,
+      assignments: buildAssignments(data.players.map((player) => player.id), secureRandom),
     };
     for (const player of data.players) {
       player.ready = false;
-      player.revealed = false;
-      player.correctWordShown = false;
+      player.out = false;
     }
     await this.save(data);
     await this.broadcast(data);
@@ -552,15 +491,10 @@ export class RoomDurableObject extends DurableObject<Env> {
 
   private async updateSettings(request: Request): Promise<Response> {
     const data = await this.requireRoom();
-    const attachment = await this.authenticate(request, data);
-    if (attachment.subject !== "host") throw new HttpError(403, "Host controls are required.");
-    if (data.phase === "active") throw new HttpError(409, "Reveal the current game before changing room mode.");
-    const body = await readJson<{ mode: RoomMode }>(request);
-    const mode: RoomMode = body.mode === "experimental" ? "experimental" : "official";
-    if (mode === "official" && data.players.length > 8) {
-      throw new HttpError(409, "Remove players until eight or fewer remain before using Official mode.");
-    }
-    data.mode = mode;
+    await this.requireHost(request, data);
+    if (data.phase === "active") throw new HttpError(409, "End the current round before changing the setup.");
+    const settings = validateSettings(await readJson<Partial<RoomSettings>>(request), data.players.length, data.customPacks);
+    Object.assign(data, settings);
     await this.save(data);
     await this.broadcast(data);
     return apiJson(this.hostView(data));
@@ -568,9 +502,8 @@ export class RoomDurableObject extends DurableObject<Env> {
 
   private async revealGame(request: Request): Promise<Response> {
     const data = await this.requireRoom();
-    const attachment = await this.authenticate(request, data);
-    if (attachment.subject !== "host") throw new HttpError(403, "Host controls are required.");
-    if (!data.game) throw new HttpError(409, "There is no game to reveal.");
+    await this.requireHost(request, data);
+    if (!data.game) throw new HttpError(409, "There is no round to end.");
     data.phase = "revealed";
     await this.save(data);
     await this.broadcast(data);
@@ -579,13 +512,17 @@ export class RoomDurableObject extends DurableObject<Env> {
 
   private async removePlayer(request: Request): Promise<Response> {
     const data = await this.requireRoom();
-    const attachment = await this.authenticate(request, data);
-    if (attachment.subject !== "host") throw new HttpError(403, "Host controls are required.");
-    if (data.phase === "active") throw new HttpError(409, "Reveal the current game before removing a player.");
+    await this.requireHost(request, data);
+    if (data.phase === "active") throw new HttpError(409, "End the current round before removing a player.");
     const { playerId } = await readJson<{ playerId: string }>(request);
+    if (playerId === data.hostPlayerId) throw new HttpError(409, "The host’s own seat cannot be removed.");
     const before = data.players.length;
     data.players = data.players.filter((player) => player.id !== playerId);
     if (data.players.length === before) throw new HttpError(404, "Player not found.");
+    for (const socket of this.ctx.getWebSockets()) {
+      const attachment = socket.deserializeAttachment() as SocketAttachment | null;
+      if (attachment?.playerId === playerId) socket.close(1000, "Removed from room");
+    }
     await this.save(data);
     await this.broadcast(data);
     return apiJson(this.hostView(data));
@@ -593,8 +530,7 @@ export class RoomDurableObject extends DurableObject<Env> {
 
   private async endRoom(request: Request): Promise<Response> {
     const data = await this.requireRoom();
-    const attachment = await this.authenticate(request, data);
-    if (attachment.subject !== "host") throw new HttpError(403, "Host controls are required.");
+    await this.requireHost(request, data);
     for (const socket of this.ctx.getWebSockets()) socket.close(1000, "Room ended");
     this.data = undefined;
     await this.ctx.storage.deleteAll();
@@ -611,8 +547,7 @@ export class RoomDurableObject extends DurableObject<Env> {
       if (path === "ticket" && request.method === "POST") return await this.issueTicket(request);
       if (path === "socket" && request.method === "GET") return await this.socket(request);
       if (path === "player/ready" && request.method === "POST") return await this.playerAction(request, "ready");
-      if (path === "player/reveal" && request.method === "POST") return await this.playerAction(request, "reveal");
-      if (path === "player/spy-answer" && request.method === "POST") return await this.playerAction(request, "spy-answer");
+      if (path === "player/out" && request.method === "POST") return await this.playerAction(request, "out");
       if (path === "host/start" && request.method === "POST") return await this.startGame(request);
       if (path === "host/settings" && request.method === "POST") return await this.updateSettings(request);
       if (path === "host/reveal" && request.method === "POST") return await this.revealGame(request);
