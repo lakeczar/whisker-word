@@ -1,4 +1,4 @@
-import type { CustomLibrary, PackSummary, RoomMode, RoomView, WordPack, WordPair } from "../shared/types";
+import type { CustomLibrary, HostRoomView, PackSummary, RoomSettings, RoomSettingsUpdate, RoomView, WordPack } from "../shared/types";
 
 export class ApiRequestError extends Error {
   constructor(message: string, public status: number) {
@@ -22,8 +22,10 @@ function authHeaders(token: string): HeadersInit {
   return { Authorization: `Bearer ${token}` };
 }
 
-export async function createRoom(): Promise<{ code: string; hostToken: string }> {
-  return jsonRequest("/api/rooms", { method: "POST", body: "{}" });
+export async function createRoom(
+  setup: RoomSettings & { hostName?: string },
+): Promise<{ code: string; hostToken: string; seatToken?: string }> {
+  return jsonRequest("/api/rooms", { method: "POST", body: JSON.stringify(setup) });
 }
 
 export async function getBuiltInPacks(): Promise<PackSummary[]> {
@@ -33,10 +35,8 @@ export async function getBuiltInPacks(): Promise<PackSummary[]> {
 export async function getPublicRoom(code: string): Promise<{
   code: string;
   phase: string;
-  mode: RoomMode;
-  players: { name: string }[];
   playerCount: number;
-  maximumPlayers: number;
+  targetPlayers: number;
 }> {
   return jsonRequest(`/api/rooms/${code}/public`);
 }
@@ -62,14 +62,12 @@ export async function roomAction<T = RoomView>(
   });
 }
 
-export async function startGame(
-  code: string,
-  token: string,
-  mode: RoomMode,
-  packIds: string[],
-  customPairs: WordPair[],
-): Promise<RoomView> {
-  return roomAction(code, token, "host/start", { mode, packIds, customPairs });
+export async function startGame(code: string, token: string): Promise<HostRoomView> {
+  return roomAction(code, token, "host/start");
+}
+
+export async function updateSettings(code: string, token: string, settings: RoomSettingsUpdate): Promise<HostRoomView> {
+  return roomAction(code, token, "host/settings", settings);
 }
 
 export async function issueSocketTicket(code: string, token: string): Promise<string> {

@@ -1,6 +1,6 @@
 # Whisker Word
 
-Whisker Word is a phone-friendly hidden-word party game. One computer hosts the room, every player scans the same QR code, and each phone receives its own private card. Phones stay connected for later games, so players scan only once.
+Whisker Word is a phone-friendly hidden-word party game. The host sets up a room in three steps (table size, word packs, and whether they are playing too), every player scans the same QR code, and each phone receives its own private card. The host can run the room from a laptop or TV, or host and play on their own phone. Phones stay connected for later rounds, so players scan only once.
 
 ## Live deployment
 
@@ -11,15 +11,17 @@ The website is hosted on Cloudflare Workers. Room state and custom word librarie
 ## What is included
 
 - Private Good Kitten, Confused Kitten, and Spy Pup cards
-- Host-only room controls that never expose the secret words
-- Live room updates over WebSockets
-- Official 4–8 player ratios and experimental 9–12 player ratios
-- Six built-in categories with 120 original password pairs
+- A setup wizard: a player-count slider that shows how many of each role will be dealt, then the word packs, then the host's choice to play
+- Host and play from one phone, with host controls that never show the words or anyone's role during a round
+- A guide on every card (peek, clue, vote) and an “I was voted out” button that shows that player's role to the whole table
+- Role counts that update as players go out, and a call when the round is decided
+- Official 4–8 player ratios and house ratios for 9–12 players
+- Eight built-in packs with 192 hand-picked word pairs
 - Reusable custom word libraries protected by a private recovery key
 - Original Whisker Word kitten and puppy artwork
 - Automatic room cleanup after 24 hours of inactivity
 
-Clues, discussion, voting, and the Spy Pup's final guess happen aloud around the table.
+Clues, discussion, and voting happen aloud around the table. Anyone voted out taps “I was voted out”; a Spy Pup says a final guess aloud first, then sees the real word.
 
 ## Run locally
 
@@ -55,13 +57,17 @@ The first command opens Cloudflare's authorization page. The second builds and p
 | 6 | 4 | 1 | 1 | Official |
 | 7 | 4 | 2 | 1 | Official |
 | 8 | 5 | 2 | 1 | Official |
-| 9 | 5 | 3 | 1 | Experimental |
-| 10 | 6 | 3 | 1 | Experimental |
-| 11 | 6 | 4 | 1 | Experimental |
-| 12 | 7 | 4 | 1 | Experimental |
+| 9 | 5 | 3 | 1 | House |
+| 10 | 6 | 3 | 1 | House |
+| 11 | 6 | 4 | 1 | House |
+| 12 | 7 | 4 | 1 | House |
+
+The setup slider sets how many seats the room has. Cards are dealt for the players who have joined, so a host can deal early with fewer than planned.
+
+A round is decided when every Confused Kitten and Spy Pup is out (the Kittens win, unless the Spy Pup guessed the word when they went out), or when only one Good Kitten is left (the impostors win).
 
 ## Privacy model
 
-Room hosts receive player status and controls, but no role or word assignments. Player seats use separate random tokens, and each player endpoint returns only that player's secret. Custom libraries use a random recovery key instead of an account; losing that key means losing access to the library.
+During a round, host controls receive player status, but no words and no roles except those of players who are already out, so a host who plays on the same phone is not spoiled. Each player endpoint returns only that player's own secret plus the public table. Both words and every role are sent to everyone once the host ends the round. Player seats use separate random tokens. Custom libraries use a random recovery key instead of an account; losing that key means losing access to the library.
 
 Ending a room deletes it immediately. Abandoned rooms are deleted after 24 hours of inactivity.
